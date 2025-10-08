@@ -8,6 +8,7 @@ const gameState = {
   playerTeam: [],
   currentPlayerPokemon: null,
   currentFoePokemon: null,
+  nextFoePokemon: null, // preloaded opponent for next battle
   battleNumber: 1,
   totalBattles: 8,
   catchCooldown: 0,
@@ -1225,12 +1226,20 @@ async function nextBattle() {
   });
   logMessage('Your team was fully healed and all PP was restored!');
   
-  // Generate new opponent
+  // Generate new opponent (use preloaded if available)
   logMessage('A wild Pokémon appeared!');
-  gameState.currentFoePokemon = await createPokemonBattleInstance(
-    await getRandomOpponentPokemon(gameState.battleNumber),
-    DEFAULT_LEVEL
-  );
+  if (gameState.nextFoePokemon) {
+    gameState.currentFoePokemon = gameState.nextFoePokemon;
+    gameState.nextFoePokemon = null;
+  } else {
+    gameState.currentFoePokemon = await createPokemonBattleInstance(
+      await getRandomOpponentPokemon(gameState.battleNumber),
+      DEFAULT_LEVEL
+    );
+  }
+  
+  // Preload the following opponent in the background
+  preloadNextOpponent();
   
   gameState.battlePhase = 'select-move';
   updateUI();
@@ -1249,6 +1258,7 @@ function restartGame() {
     playerTeam: [],
     currentPlayerPokemon: null,
     currentFoePokemon: null,
+    nextFoePokemon: null,
     battleNumber: 1,
     totalBattles: 8,
     catchCooldown: 0,
@@ -1265,6 +1275,37 @@ function restartGame() {
   document.getElementById('end-screen').classList.add('hidden');
   document.getElementById('game-screen').classList.add('hidden');
   document.getElementById('start-screen').classList.remove('hidden');
+}
+
+// ==========================================
+// PRELOADING NEXT OPPONENT & ASSETS
+// ==========================================
+
+function preloadPokemonAssets(pokemon) {
+  if (!pokemon || !pokemon.sprites) return;
+  const urls = [];
+  if (pokemon.sprites.front_default) urls.push(pokemon.sprites.front_default);
+  if (pokemon.sprites.back_default) urls.push(pokemon.sprites.back_default);
+  urls.forEach(u => {
+    try {
+      const img = new Image();
+      img.src = u;
+    } catch (e) {
+      // Ignore if Image is not available (e.g., in non-browser environments)
+    }
+  });
+}
+
+function preloadNextOpponent() {
+  const nextBattleNumber = gameState.battleNumber + 1;
+  // Fire-and-forget: prepare the next foe in background
+  getRandomOpponentPokemon(nextBattleNumber)
+    .then(data => createPokemonBattleInstance(data, DEFAULT_LEVEL))
+    .then(instance => {
+      gameState.nextFoePokemon = instance;
+      preloadPokemonAssets(instance);
+    })
+    .catch(err => console.warn('Preload next opponent failed:', err));
 }
 
 // ==========================================
@@ -1294,6 +1335,9 @@ async function startGame() {
     await getRandomOpponentPokemon(gameState.battleNumber),
     DEFAULT_LEVEL
   );
+  
+  // Begin preloading the next opponent during the current battle
+  preloadNextOpponent();
   
   gameState.isInBattle = true;
   gameState.battlePhase = 'select-move';
