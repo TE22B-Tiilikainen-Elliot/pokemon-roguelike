@@ -381,26 +381,37 @@ async function getWeakPokemonOfType(type) {
   return await fetchPokemonData(candidates[0]);
 }
 
-async function fetchRandomOpponentByBST(maxBST) {
+async function fetchRandomOpponentByBST(minBST, maxBST) {
   // Search among early gen (1-151) to keep sprites fast
   let last = null;
-  for (let i = 0; i < 20; i++) {
+  let candidates = [];
+  
+  for (let i = 0; i < 30; i++) {
     const id = Math.floor(Math.random() * 151) + 1;
     const data = await fetchPokemonData(id);
+    const bst = getBST(data);
     last = data;
-    if (getBST(data) <= maxBST) return data;
+    
+    // Collect candidates that meet both min and max BST requirements
+    if (bst >= minBST && bst <= maxBST) {
+      candidates.push(data);
+    }
   }
-  return last; // Fallback if none found quickly
+  
+  // Return random candidate if we found any, otherwise fallback
+  return candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : last;
 }
 
 async function getRandomOpponentPokemon(battleNumber) {
-  // Early battles use weaker opponents by BST; later battles can be stronger
-  if (battleNumber <= 3) {
-    return await fetchRandomOpponentByBST(WEAK_BST_THRESHOLD);
-  }
-  // Otherwise any early-gen random
-  const id = Math.floor(Math.random() * 151) + 1;
-  return await fetchPokemonData(id);
+  // Calculate minimum and maximum BST based on battle number for scaling difficulty
+  const baseMinBST = 250; // Very weak Pokemon floor
+  const bstIncreasePerBattle = 15; // Gradual BST increase
+  const maxBSTCap = 600; // Cap to prevent overpowered legendaries
+  
+  const minBST = Math.min(baseMinBST + (battleNumber - 1) * bstIncreasePerBattle, maxBSTCap - 100);
+  const maxBST = Math.min(minBST + 150, maxBSTCap); // Allow some variation above minimum
+  
+  return await fetchRandomOpponentByBST(minBST, maxBST);
 }
 
 // ==========================================
@@ -719,12 +730,16 @@ function checkBattleEnd() {
     if (alivePokemon.length === 0) {
       // Game over
       return 'game-over';
-    } else {
-      // Switch to next Pokémon
+    } else if (alivePokemon.length === 1) {
+      // Only one Pokemon left, automatically switch
       gameState.currentPlayerPokemon = alivePokemon[0];
       logMessage(`Go, ${capitalize(gameState.currentPlayerPokemon.name)}!`);
       updateUI();
       return null; // Continue battle
+    } else {
+      // Multiple Pokemon available, let player choose
+      showPokemonSelection(alivePokemon);
+      return 'pokemon-selection'; // Special state for Pokemon selection
     }
   } else if (foe.stats.currentHp === 0) {
     // Player won the battle
@@ -889,6 +904,160 @@ function updateTopBar() {
 }
 
 // ==========================================
+// POKEMON SELECTION SYSTEM
+// ==========================================
+
+function showPokemonSelection(availablePokemon) {
+  gameState.battlePhase = 'pokemon-selection';
+  document.getElementById('move-buttons').style.display = 'none';
+  document.getElementById('pokemon-selection').classList.remove('hidden');
+  
+  const selectionList = document.getElementById('selection-list');
+  selectionList.innerHTML = '';
+  
+  availablePokemon.forEach(pokemon => {
+    const memberEl = document.createElement('div');
+    memberEl.className = 'selection-member';
+    
+    const spriteEl = document.createElement('div');
+    spriteEl.className = 'sprite';
+    if (pokemon.sprites.front_default) {
+      spriteEl.style.backgroundImage = `url(${pokemon.sprites.front_default})`;
+    }
+    
+    const infoEl = document.createElement('div');
+    infoEl.className = 'info';
+    
+    const nameEl = document.createElement('div');
+    nameEl.className = 'name';
+    nameEl.textContent = capitalize(pokemon.name);
+    
+    const typesEl = document.createElement('div');
+    typesEl.className = 'types';
+    typesEl.textContent = pokemon.types.map(t => capitalize(t.type.name)).join(', ');
+    
+    const hpBarEl = document.createElement('div');
+    hpBarEl.className = 'hpbar';
+    const hpFillEl = document.createElement('div');
+    const hpPercent = (pokemon.stats.currentHp / pokemon.stats.maxHp) * 100;
+    hpFillEl.className = 'fill';
+    hpFillEl.style.width = `${hpPercent}%`;
+    if (hpPercent < 25) hpFillEl.className += ' critical';
+    else if (hpPercent < 50) hpFillEl.className += ' low';
+    hpBarEl.appendChild(hpFillEl);
+    
+    const hpTextEl = document.createElement('div');
+    hpTextEl.className = 'hp-text';
+    hpTextEl.textContent = `${pokemon.stats.currentHp}/${pokemon.stats.maxHp}`;
+    
+    infoEl.appendChild(nameEl);
+    infoEl.appendChild(typesEl);
+    infoEl.appendChild(hpBarEl);
+    infoEl.appendChild(hpTextEl);
+    
+    memberEl.appendChild(spriteEl);
+    memberEl.appendChild(infoEl);
+    
+    memberEl.addEventListener('click', () => {
+      handlePokemonSelection(pokemon);
+    });
+    
+    selectionList.appendChild(memberEl);
+  });
+}
+
+function handlePokemonSelection(selectedPokemon) {
+  gameState.currentPlayerPokemon = selectedPokemon;
+  document.getElementById('pokemon-selection').classList.add('hidden');
+  document.getElementById('move-buttons').style.display = 'grid';
+  gameState.battlePhase = 'select-move';
+  
+  logMessage(`Go, ${capitalize(selectedPokemon.name)}!`);
+  updateUI();
+}
+
+function showReplacementSelection(caughtPokemon) {
+  document.getElementById('replacement-selection').classList.remove('hidden');
+  
+  const replacementList = document.getElementById('replacement-list');
+  replacementList.innerHTML = '';
+  
+  gameState.playerTeam.forEach((pokemon, index) => {
+    const memberEl = document.createElement('div');
+    memberEl.className = 'replacement-member';
+    
+    const spriteEl = document.createElement('div');
+    spriteEl.className = 'sprite';
+    if (pokemon.sprites.front_default) {
+      spriteEl.style.backgroundImage = `url(${pokemon.sprites.front_default})`;
+    }
+    
+    const infoEl = document.createElement('div');
+    infoEl.className = 'info';
+    
+    const nameEl = document.createElement('div');
+    nameEl.className = 'name';
+    nameEl.textContent = capitalize(pokemon.name);
+    
+    const typesEl = document.createElement('div');
+    typesEl.className = 'types';
+    typesEl.textContent = pokemon.types.map(t => capitalize(t.type.name)).join(', ');
+    
+    const hpBarEl = document.createElement('div');
+    hpBarEl.className = 'hpbar';
+    const hpFillEl = document.createElement('div');
+    const hpPercent = (pokemon.stats.currentHp / pokemon.stats.maxHp) * 100;
+    hpFillEl.className = 'fill';
+    hpFillEl.style.width = `${hpPercent}%`;
+    if (hpPercent < 25) hpFillEl.className += ' critical';
+    else if (hpPercent < 50) hpFillEl.className += ' low';
+    hpBarEl.appendChild(hpFillEl);
+    
+    const hpTextEl = document.createElement('div');
+    hpTextEl.className = 'hp-text';
+    hpTextEl.textContent = `${pokemon.stats.currentHp}/${pokemon.stats.maxHp}`;
+    
+    infoEl.appendChild(nameEl);
+    infoEl.appendChild(typesEl);
+    infoEl.appendChild(hpBarEl);
+    infoEl.appendChild(hpTextEl);
+    
+    memberEl.appendChild(spriteEl);
+    memberEl.appendChild(infoEl);
+    
+    memberEl.addEventListener('click', () => {
+      handleReplacement(index, caughtPokemon);
+    });
+    
+    replacementList.appendChild(memberEl);
+  });
+}
+
+function handleReplacement(replaceIndex, caughtPokemon) {
+  const replacedPokemon = gameState.playerTeam[replaceIndex];
+  logMessage(`You released ${capitalize(replacedPokemon.name)} to make room for ${capitalize(caughtPokemon.name)}!`);
+  
+  // Replace the Pokemon in the team
+  gameState.playerTeam[replaceIndex] = caughtPokemon;
+  
+  // If the replaced Pokemon was the current one, switch to the new one
+  if (gameState.currentPlayerPokemon === replacedPokemon) {
+    gameState.currentPlayerPokemon = caughtPokemon;
+  }
+  
+  gameState.catchCooldown = 3;
+  document.getElementById('replacement-selection').classList.add('hidden');
+  
+  // Immediately proceed to the next battle after replacement
+  nextBattle();
+}
+
+function cancelCatch() {
+  document.getElementById('replacement-selection').classList.add('hidden');
+  document.getElementById('next-battle').classList.remove('hidden');
+}
+
+// ==========================================
 // EVENT HANDLERS
 // ==========================================
 
@@ -956,6 +1125,8 @@ async function handleMoveSelection(playerMove) {
   } else if (battleResult === 'player-won') {
     gameState.battlePhase = 'battle-end';
     showPostBattleOptions();
+  } else if (battleResult === 'pokemon-selection') {
+    // Pokemon selection is handled in checkBattleEnd, nothing more to do
   } else {
     // Battle continues
     gameState.battlePhase = 'select-move';
@@ -967,8 +1138,8 @@ function showPostBattleOptions() {
   document.getElementById('move-buttons').style.display = 'none';
   document.getElementById('post-battle').classList.remove('hidden');
   
-  // Show catch option if not on cooldown and team not full
-  if (gameState.catchCooldown === 0 && gameState.playerTeam.length < 3) {
+  // Show catch option if not on cooldown
+  if (gameState.catchCooldown === 0) {
     document.getElementById('catch-offer').classList.remove('hidden');
   } else {
     document.getElementById('next-battle').classList.remove('hidden');
@@ -979,16 +1150,23 @@ function handleCatch(shouldCatch) {
   document.getElementById('catch-offer').classList.add('hidden');
   
   if (shouldCatch) {
-    // Add the defeated Pokémon to team
     const caughtPokemon = gameState.currentFoePokemon;
     caughtPokemon.stats.currentHp = Math.floor(caughtPokemon.stats.maxHp * 0.5); // Heal partially
-    gameState.playerTeam.push(caughtPokemon);
     gameState.catchCooldown = 3;
     
-    logMessage(`You caught ${capitalize(caughtPokemon.name)}!`);
-    // Immediately proceed to the next battle after catching
-    nextBattle();
-    return;
+    if (gameState.playerTeam.length < 6) {
+      // Team has space, add directly
+      gameState.playerTeam.push(caughtPokemon);
+      logMessage(`You caught ${capitalize(caughtPokemon.name)}!`);
+      // Immediately proceed to the next battle after catching
+      nextBattle();
+      return;
+    } else {
+      // Team is full, show replacement selection
+      logMessage(`You caught ${capitalize(caughtPokemon.name)}, but your team is full!`);
+      showReplacementSelection(caughtPokemon);
+      return;
+    }
   }
   
   // If not catching, allow manual proceed
@@ -1117,6 +1295,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Catch buttons
   document.getElementById('catch-yes').addEventListener('click', () => handleCatch(true));
   document.getElementById('catch-no').addEventListener('click', () => handleCatch(false));
+  
+  // Cancel catch button
+  document.getElementById('cancel-catch').addEventListener('click', cancelCatch);
   
   // Next battle button
   document.getElementById('next-battle').addEventListener('click', nextBattle);

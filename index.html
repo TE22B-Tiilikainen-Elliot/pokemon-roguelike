@@ -51,7 +51,7 @@
 
       <div class="row">
         <div class="card team">
-          <h3>Your Team (max 3)</h3>
+          <h3>Your Team (max 6)</h3>
           <div id="team-list" class="team-list"></div>
         </div>
         <div class="card battle">
@@ -90,6 +90,17 @@
               </div>
             </div>
             <button id="next-battle" class="primary hidden">Next Battle</button>
+          </div>
+          
+          <div id="pokemon-selection" class="pokemon-selection hidden">
+            <h3>Choose your next Pokémon!</h3>
+            <div id="selection-list" class="selection-list"></div>
+          </div>
+          
+          <div id="replacement-selection" class="replacement-selection hidden">
+            <h3>Your team is full! Choose a Pokémon to replace:</h3>
+            <div id="replacement-list" class="replacement-list"></div>
+            <button id="cancel-catch" class="secondary">Cancel Catch</button>
           </div>
         </div>
       </div>
