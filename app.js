@@ -95,6 +95,10 @@ const NATURE_MOD = 1.0; // neutral nature
 const WEAK_BST_THRESHOLD = 330;
 const STARTER_BST_THRESHOLD = 450; // Slightly stronger starters
 
+// Total number of mainline Pokédex entries supported by PokeAPI (approx; includes up to Gen 9)
+// Used for random opponent sampling across all generations.
+const TOTAL_POKEMON_IDS = 1025;
+
 function getBST(pokemonData) {
   if (!pokemonData || !pokemonData.stats) return 0;
   return pokemonData.stats.reduce((sum, s) => sum + (s.base_stat || 0), 0);
@@ -382,36 +386,50 @@ async function getWeakPokemonOfType(type) {
 }
 
 async function fetchRandomOpponentByBST(minBST, maxBST) {
-  // Search among early gen (1-151) to keep sprites fast
+  // Search across all generations (1..TOTAL_POKEMON_IDS)
   let last = null;
   let candidates = [];
+  let best = null;
+  let bestBST = -1;
   
-  for (let i = 0; i < 30; i++) {
-    const id = Math.floor(Math.random() * 151) + 1;
+  const attempts = 60; // more attempts to better meet min threshold
+  for (let i = 0; i < attempts; i++) {
+    const id = Math.floor(Math.random() * TOTAL_POKEMON_IDS) + 1;
     const data = await fetchPokemonData(id);
     const bst = getBST(data);
     last = data;
+
+    // Track best seen to avoid regressions in difficulty
+    if (bst > bestBST) {
+      best = data;
+      bestBST = bst;
+    }
     
-    // Collect candidates that meet both min and max BST requirements
-    if (bst >= minBST && bst <= maxBST) {
+    // Collect candidates that meet constraints (maxBST optional)
+    const withinMax = (typeof maxBST === 'number') ? (bst <= maxBST) : true;
+    if (bst >= minBST && withinMax) {
       candidates.push(data);
     }
   }
   
-  // Return random candidate if we found any, otherwise fallback
-  return candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : last;
+  // Prefer a candidate meeting the minimum; otherwise use the highest BST seen
+  if (candidates.length > 0) {
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+  if (best) return best;
+  return last; // Final fallback
 }
 
 async function getRandomOpponentPokemon(battleNumber) {
-  // Calculate minimum and maximum BST based on battle number for scaling difficulty
+  // Calculate minimum BST based on battle number for scaling difficulty.
+  // No maximum cap so late-game can surface legendaries and other high-BST Pokémon.
   const baseMinBST = 250; // Very weak Pokemon floor
   const bstIncreasePerBattle = 15; // Gradual BST increase
-  const maxBSTCap = 600; // Cap to prevent overpowered legendaries
   
-  const minBST = Math.min(baseMinBST + (battleNumber - 1) * bstIncreasePerBattle, maxBSTCap - 100);
-  const maxBST = Math.min(minBST + 150, maxBSTCap); // Allow some variation above minimum
+  const minBST = baseMinBST + (battleNumber - 1) * bstIncreasePerBattle;
   
-  return await fetchRandomOpponentByBST(minBST, maxBST);
+  // Pass only the minimum; fetchRandomOpponentByBST will not restrict the maximum.
+  return await fetchRandomOpponentByBST(minBST);
 }
 
 // ==========================================
