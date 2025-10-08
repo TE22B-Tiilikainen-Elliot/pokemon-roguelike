@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pokémon Roguelike (Combat Prototype)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Pokémon Roguelike (Combat Prototype)</h1>
+      <p class="subtitle">Choose a type, get a weak Pokémon of that type, and fight through sequential battles. Catching imposes a 3-battle cooldown. Team size ≤ 3.</p>
+    </header>
+
+    <section id="start-screen">
+      <div class="card">
+        <h2>Choose Your Specialization Type</h2>
+        <div class="row">
+          <select id="type-select" aria-label="Choose a Pokémon type">
+            <option value="normal">Normal</option>
+            <option value="fire">Fire</option>
+            <option value="water">Water</option>
+            <option value="grass">Grass</option>
+            <option value="electric">Electric</option>
+            <option value="ice">Ice</option>
+            <option value="fighting">Fighting</option>
+            <option value="poison">Poison</option>
+            <option value="ground">Ground</option>
+            <option value="flying">Flying</option>
+            <option value="psychic">Psychic</option>
+            <option value="bug">Bug</option>
+            <option value="rock">Rock</option>
+            <option value="ghost">Ghost</option>
+            <option value="dragon">Dragon</option>
+            <option value="dark">Dark</option>
+            <option value="steel">Steel</option>
+            <option value="fairy">Fairy</option>
+          </select>
+          <button id="start-btn" class="primary">Start Run</button>
+        </div>
+        <p class="hint">Data is loaded live from PokeAPI. For a smoother demo, early-generation Pokémon are favored for opponents.</p>
+      </div>
+    </section>
+
+    <section id="game-screen" class="hidden">
+      <div class="top-bar">
+        <div>Battle <span id="battle-number">1</span>/<span id="total-battles">8</span></div>
+        <div>Catch Cooldown: <span id="catch-cooldown">0</span></div>
+      </div>
+
+      <div class="row">
+        <div class="card team">
+          <h3>Your Team (max 3)</h3>
+          <div id="team-list" class="team-list"></div>
+        </div>
+        <div class="card battle">
+          <div class="battle-arena">
+            <div class="side player-side">
+              <div class="sprite" id="player-sprite"></div>
+              <div class="panel">
+                <div id="player-name" class="name">-</div>
+                <div id="player-types" class="types">-</div>
+                <div class="hpbar"><div id="player-hp-fill" class="fill"></div></div>
+                <div id="player-hp-text" class="hp-text">-</div>
+              </div>
+            </div>
+            <div class="vs">VS</div>
+            <div class="side foe-side">
+              <div class="sprite" id="foe-sprite"></div>
+              <div class="panel">
+                <div id="foe-name" class="name">-</div>
+                <div id="foe-types" class="types">-</div>
+                <div class="hpbar"><div id="foe-hp-fill" class="fill"></div></div>
+                <div id="foe-hp-text" class="hp-text">-</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="move-buttons" class="moves"></div>
+
+          <div id="message-log" class="log" aria-live="polite"></div>
+
+          <div id="post-battle" class="post-battle hidden">
+            <div id="catch-offer" class="catch-offer hidden">
+              <p>Do you want to catch the defeated Pokémon?</p>
+              <div class="row">
+                <button id="catch-yes" class="primary">Catch</button>
+                <button id="catch-no">Skip</button>
+              </div>
+            </div>
+            <button id="next-battle" class="primary hidden">Next Battle</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="end-screen" class="end-screen hidden">
+        <h2 id="end-title"></h2>
+        <p id="end-detail"></p>
+        <button id="restart-btn" class="primary">Restart</button>
+      </div>
+    </section>
+
+    <footer>
+      <small>Prototype uses data from <a href="https://pokeapi.co/" target="_blank" rel="noreferrer noopener">PokeAPI</a>. Sprites © respective owners via PokeAPI sprites. This is a non-commercial fan prototype.</small>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
