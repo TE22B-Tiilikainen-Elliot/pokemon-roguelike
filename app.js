@@ -42,6 +42,49 @@ const typeChart = {
 const pokemonCache = new Map();
 const moveCache = new Map();
 
+// Special move mechanics data
+const SPECIAL_MOVES = {
+  // 2-turn moves (charge moves)
+  'solar-beam': { type: 'charge', chargeTurn: 'absorbing sunlight' },
+  'razor-wind': { type: 'charge', chargeTurn: 'whipping up a whirlwind' },
+  'skull-bash': { type: 'charge', chargeTurn: 'lowering its head' },
+  'sky-attack': { type: 'charge', chargeTurn: 'glowing intensely' },
+  'fly': { type: 'charge', chargeTurn: 'flying up high' },
+  'dig': { type: 'charge', chargeTurn: 'burrowing underground' },
+  'dive': { type: 'charge', chargeTurn: 'diving underwater' },
+  'bounce': { type: 'charge', chargeTurn: 'springing up' },
+  
+  // Recoil moves
+  'take-down': { type: 'recoil', recoilPercent: 25 },
+  'double-edge': { type: 'recoil', recoilPercent: 33 },
+  'submission': { type: 'recoil', recoilPercent: 25 },
+  'jump-kick': { type: 'recoil', recoilPercent: 50, missRecoil: true },
+  'high-jump-kick': { type: 'recoil', recoilPercent: 50, missRecoil: true },
+  'volt-tackle': { type: 'recoil', recoilPercent: 33 },
+  'flare-blitz': { type: 'recoil', recoilPercent: 33 },
+  'brave-bird': { type: 'recoil', recoilPercent: 33 },
+  'wood-hammer': { type: 'recoil', recoilPercent: 33 },
+  'head-smash': { type: 'recoil', recoilPercent: 50 },
+  
+  // Multi-hit moves
+  'double-slap': { type: 'multi-hit', hits: [2, 5] },
+  'comet-punch': { type: 'multi-hit', hits: [2, 5] },
+  'fury-attack': { type: 'multi-hit', hits: [2, 5] },
+  'pin-missile': { type: 'multi-hit', hits: [2, 5] },
+  'spike-cannon': { type: 'multi-hit', hits: [2, 5] },
+  'barrage': { type: 'multi-hit', hits: [2, 5] },
+  'fury-swipes': { type: 'multi-hit', hits: [2, 5] },
+  'bone-rush': { type: 'multi-hit', hits: [2, 5] },
+  'double-kick': { type: 'multi-hit', hits: [2, 2] }, // Always hits twice
+  'twineedle': { type: 'multi-hit', hits: [2, 2] }
+};
+
+// Battle state for 2-turn moves
+const battleState = {
+  playerChargingMove: null,
+  foeChargingMove: null
+};
+
 // Level and stat assumptions
 const DEFAULT_LEVEL = 50; // All Pokemon are level 50
 const DEFAULT_IV = 31;
@@ -50,6 +93,7 @@ const NATURE_MOD = 1.0; // neutral nature
 
 // BST threshold to define "weaker" Pokémon for starters and early foes
 const WEAK_BST_THRESHOLD = 330;
+const STARTER_BST_THRESHOLD = 450; // Slightly stronger starters
 
 function getBST(pokemonData) {
   if (!pokemonData || !pokemonData.stats) return 0;
@@ -106,6 +150,98 @@ function getEffectivenessText(effectiveness) {
   return "";
 }
 
+function isChargingMove(moveName) {
+  const moveData = SPECIAL_MOVES[moveName];
+  return moveData && moveData.type === 'charge';
+}
+
+function isRecoilMove(moveName) {
+  const moveData = SPECIAL_MOVES[moveName];
+  return moveData && moveData.type === 'recoil';
+}
+
+function isMultiHitMove(moveName) {
+  const moveData = SPECIAL_MOVES[moveName];
+  return moveData && moveData.type === 'multi-hit';
+}
+
+function getMultiHitCount(moveName) {
+  const moveData = SPECIAL_MOVES[moveName];
+  if (!moveData || moveData.type !== 'multi-hit') return 1;
+  
+  const [min, max] = moveData.hits;
+  if (min === max) return min;
+  
+  // Weighted distribution: 2 hits (37.5%), 3 hits (37.5%), 4 hits (12.5%), 5 hits (12.5%)
+  const rand = Math.random();
+  if (rand < 0.375) return min;
+  if (rand < 0.75) return min + 1;
+  if (rand < 0.875) return max - 1;
+  return max;
+}
+
+function calculateRecoilDamage(attacker, move, damageDealt) {
+  const moveData = SPECIAL_MOVES[move.name];
+  if (!moveData || moveData.type !== 'recoil') return 0;
+  
+  // For moves like Jump Kick that cause recoil on miss
+  if (damageDealt === 0 && moveData.missRecoil) {
+    return Math.floor(attacker.stats.maxHp / 2); // Half max HP on miss
+  }
+  
+  return Math.floor(damageDealt * (moveData.recoilPercent / 100));
+}
+
+async function executeSpecialMove(attacker, defender, move, isPlayer) {
+  // Handle charging moves (2-turn moves)
+  if (isChargingMove(move.name)) {
+    const chargingMoveKey = isPlayer ? 'playerChargingMove' : 'foeChargingMove';
+    
+    if (!battleState[chargingMoveKey]) {
+      // First turn: charge up
+      battleState[chargingMoveKey] = move;
+      const moveData = SPECIAL_MOVES[move.name];
+      logMessage(`${capitalize(attacker.name)} is ${moveData.chargeTurn}!`);
+      move.currentPp--; // Use PP on charge turn
+      return { damage: 0, charging: true };
+    } else {
+      // Second turn: execute the move
+      battleState[chargingMoveKey] = null;
+      // Fall through to normal damage calculation
+    }
+  }
+  
+  // Handle multi-hit moves
+  if (isMultiHitMove(move.name)) {
+    const hitCount = getMultiHitCount(move.name);
+    let totalDamage = 0;
+    let hitsMade = 0;
+    
+    for (let i = 0; i < hitCount; i++) {
+      const result = calculateDamage(attacker, defender, move);
+      if (result.missed && i === 0) {
+        // If first hit misses, entire move misses
+        logMessage(`${capitalize(attacker.name)} used ${capitalize(move.name)} but it missed!`);
+        return { damage: 0, missed: true };
+      } else if (!result.missed) {
+        totalDamage += result.damage;
+        hitsMade++;
+      }
+    }
+    
+    if (hitsMade > 0) {
+      logMessage(`${capitalize(attacker.name)} used ${capitalize(move.name)} ${hitsMade} time${hitsMade > 1 ? 's' : ''}!`);
+      return { damage: totalDamage, hits: hitsMade, effectiveness: calculateDamage(attacker, defender, move).effectiveness };
+    }
+    
+    return { damage: 0, missed: true };
+  }
+  
+  // Normal single-hit move
+  const result = calculateDamage(attacker, defender, move);
+  return result;
+}
+
 // ==========================================
 // POKÉMON DATA & API
 // ==========================================
@@ -146,6 +282,55 @@ async function fetchPokemonData(nameOrId) {
       candidateMoves: []
     };
   }
+}
+
+async function getStarterPokemonOfType(type) {
+  // Better starter pool (evolved forms and stronger base Pokemon)
+  const starterPokemonByType = {
+    normal: ['persian', 'raticate', 'fearow', 'furret', 'linoone'],
+    fire: ['charmeleon', 'arcanine', 'rapidash', 'flareon', 'camerupt'],
+    water: ['wartortle', 'golduck', 'gyarados', 'vaporeon', 'lapras'],
+    grass: ['ivysaur', 'gloom', 'weepinbell', 'bayleef', 'grovyle'],
+    electric: ['raichu', 'magneton', 'electrode', 'flaaffy', 'manectric'],
+    ice: ['dewgong', 'cloyster', 'piloswine', 'glalie'],
+    fighting: ['machoke', 'primeape', 'hitmonlee', 'hitmonchan'],
+    poison: ['arbok', 'nidorino', 'nidorina', 'muk', 'crobat'],
+    ground: ['sandslash', 'dugtrio', 'donphan', 'flygon'],
+    flying: ['fearow', 'golbat', 'noctowl', 'skarmory'],
+    psychic: ['kadabra', 'slowbro', 'hypno', 'kirlia', 'gardevoir'],
+    bug: ['butterfree', 'beedrill', 'scyther', 'pinsir', 'forretress'],
+    rock: ['graveler', 'onix', 'rhydon', 'golem'],
+    ghost: ['haunter', 'gengar', 'banette'],
+    dragon: ['dragonair', 'flygon', 'altaria'],
+    dark: ['mightyena', 'houndoom', 'umbreon'],
+    steel: ['magneton', 'skarmory', 'metagross'],
+    fairy: ['wigglytuff', 'clefable', 'gardevoir']
+  };
+
+  const candidates = [...(starterPokemonByType[type] || ['raticate'])];
+
+  // Try to find a Pokémon under the starter BST threshold but above weak threshold
+  for (let i = 0; i < Math.min(10, candidates.length * 2); i++) {
+    const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+    const data = await fetchPokemonData(chosen);
+    const bst = getBST(data);
+    if (bst <= STARTER_BST_THRESHOLD && bst > WEAK_BST_THRESHOLD && data.types.some(t => t.type.name === type)) {
+      return data;
+    }
+  }
+
+  // Fallback: return the best by BST among candidates of the right type
+  let best = null;
+  for (const name of candidates) {
+    const data = await fetchPokemonData(name);
+    if (data.types.some(t => t.type.name === type)) {
+      if (!best || getBST(data) > getBST(best)) best = data;
+    }
+  }
+  if (best) return best;
+
+  // As a last resort, use the weak pokemon function
+  return await getWeakPokemonOfType(type);
 }
 
 async function getWeakPokemonOfType(type) {
@@ -371,31 +556,74 @@ async function executeTurn(playerMove, foeMove) {
   const player = gameState.currentPlayerPokemon;
   const foe = gameState.currentFoePokemon;
   
+  // Check for 2-turn moves in progress
+  const playerChargingMove = battleState.playerChargingMove;
+  const foeChargingMove = battleState.foeChargingMove;
+  
+  // If a Pokémon is charging, use the charging move instead
+  const actualPlayerMove = playerChargingMove || playerMove;
+  const actualFoeMove = foeChargingMove || foeMove;
+  
   // Determine turn order (simplified: just use speed)
   const playerFirst = player.stats.speed >= foe.stats.speed;
   
   const firstAttacker = playerFirst ? player : foe;
-  const firstMove = playerFirst ? playerMove : foeMove;
+  const firstMove = playerFirst ? actualPlayerMove : actualFoeMove;
   const secondAttacker = playerFirst ? foe : player;
-  const secondMove = playerFirst ? foeMove : playerMove;
+  const secondMove = playerFirst ? actualFoeMove : actualPlayerMove;
   const firstDefender = playerFirst ? foe : player;
   const secondDefender = playerFirst ? player : foe;
+  const firstIsPlayer = playerFirst;
+  const secondIsPlayer = !playerFirst;
   
   // First attack
-  if (firstMove && firstMove.currentPp > 0) {
-    firstMove.currentPp--;
-    const result = calculateDamage(firstAttacker, firstDefender, firstMove);
+  if (firstMove && (firstMove.currentPp > 0 || battleState[firstIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
+    // Don't consume PP if continuing a charging move
+    if (!battleState[firstIsPlayer ? 'playerChargingMove' : 'foeChargingMove']) {
+      firstMove.currentPp--;
+    }
     
-    if (result.missed) {
-      logMessage(`${capitalize(firstAttacker.name)} used ${capitalize(firstMove.name)} but it missed!`);
+    const result = await executeSpecialMove(firstAttacker, firstDefender, firstMove, firstIsPlayer);
+    
+    if (result.charging) {
+      // Move is charging, continue to second attacker
+    } else if (result.missed) {
+      if (!result.hits) {
+        logMessage(`${capitalize(firstAttacker.name)} used ${capitalize(firstMove.name)} but it missed!`);
+      }
+      
+      // Handle recoil on miss for moves like Jump Kick
+      const recoilDamage = calculateRecoilDamage(firstAttacker, firstMove, 0);
+      if (recoilDamage > 0) {
+        firstAttacker.stats.currentHp = Math.max(0, firstAttacker.stats.currentHp - recoilDamage);
+        logMessage(`${capitalize(firstAttacker.name)} kept going and crashed! It took ${recoilDamage} damage!`);
+        if (firstAttacker.stats.currentHp === 0) {
+          logMessage(`${capitalize(firstAttacker.name)} fainted!`);
+          updateUI();
+          return checkBattleEnd();
+        }
+      }
     } else {
       firstDefender.stats.currentHp = Math.max(0, firstDefender.stats.currentHp - result.damage);
-      let damageMsg = `${capitalize(firstAttacker.name)} used ${capitalize(firstMove.name)} for ${result.damage} damage!`;
-      if (result.crit) damageMsg += ' Critical hit!';
+      
+      let damageMsg;
+      if (result.hits && result.hits > 1) {
+        damageMsg = `It dealt ${result.damage} total damage!`;
+      } else {
+        damageMsg = `${capitalize(firstAttacker.name)} used ${capitalize(firstMove.name)} for ${result.damage} damage!`;
+        if (result.crit) damageMsg += ' Critical hit!';
+      }
       logMessage(damageMsg);
       
-      if (result.effectiveness !== 1) {
+      if (result.effectiveness !== undefined && result.effectiveness !== 1) {
         logMessage(getEffectivenessText(result.effectiveness));
+      }
+      
+      // Handle recoil damage
+      const recoilDamage = calculateRecoilDamage(firstAttacker, firstMove, result.damage);
+      if (recoilDamage > 0) {
+        firstAttacker.stats.currentHp = Math.max(0, firstAttacker.stats.currentHp - recoilDamage);
+        logMessage(`${capitalize(firstAttacker.name)} was hurt by recoil! It took ${recoilDamage} damage!`);
       }
       
       if (firstDefender.stats.currentHp === 0) {
@@ -403,28 +631,73 @@ async function executeTurn(playerMove, foeMove) {
         updateUI();
         return checkBattleEnd();
       }
+      
+      if (firstAttacker.stats.currentHp === 0) {
+        logMessage(`${capitalize(firstAttacker.name)} fainted from recoil!`);
+        updateUI();
+        return checkBattleEnd();
+      }
     }
   }
   
   // Second attack (if first defender didn't faint)
-  if (secondDefender.stats.currentHp > 0 && secondMove && secondMove.currentPp > 0) {
-    secondMove.currentPp--;
-    const result = calculateDamage(secondAttacker, secondDefender, secondMove);
+  if (secondDefender.stats.currentHp > 0 && secondMove && (secondMove.currentPp > 0 || battleState[secondIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
+    // Don't consume PP if continuing a charging move
+    if (!battleState[secondIsPlayer ? 'playerChargingMove' : 'foeChargingMove']) {
+      secondMove.currentPp--;
+    }
     
-    if (result.missed) {
-      logMessage(`${capitalize(secondAttacker.name)} used ${capitalize(secondMove.name)} but it missed!`);
+    const result = await executeSpecialMove(secondAttacker, secondDefender, secondMove, secondIsPlayer);
+    
+    if (result.charging) {
+      // Move is charging, end turn
+    } else if (result.missed) {
+      if (!result.hits) {
+        logMessage(`${capitalize(secondAttacker.name)} used ${capitalize(secondMove.name)} but it missed!`);
+      }
+      
+      // Handle recoil on miss for moves like Jump Kick
+      const recoilDamage = calculateRecoilDamage(secondAttacker, secondMove, 0);
+      if (recoilDamage > 0) {
+        secondAttacker.stats.currentHp = Math.max(0, secondAttacker.stats.currentHp - recoilDamage);
+        logMessage(`${capitalize(secondAttacker.name)} kept going and crashed! It took ${recoilDamage} damage!`);
+        if (secondAttacker.stats.currentHp === 0) {
+          logMessage(`${capitalize(secondAttacker.name)} fainted!`);
+          updateUI();
+          return checkBattleEnd();
+        }
+      }
     } else {
       secondDefender.stats.currentHp = Math.max(0, secondDefender.stats.currentHp - result.damage);
-      let damageMsg = `${capitalize(secondAttacker.name)} used ${capitalize(secondMove.name)} for ${result.damage} damage!`;
-      if (result.crit) damageMsg += ' Critical hit!';
+      
+      let damageMsg;
+      if (result.hits && result.hits > 1) {
+        damageMsg = `It dealt ${result.damage} total damage!`;
+      } else {
+        damageMsg = `${capitalize(secondAttacker.name)} used ${capitalize(secondMove.name)} for ${result.damage} damage!`;
+        if (result.crit) damageMsg += ' Critical hit!';
+      }
       logMessage(damageMsg);
       
-      if (result.effectiveness !== 1) {
+      if (result.effectiveness !== undefined && result.effectiveness !== 1) {
         logMessage(getEffectivenessText(result.effectiveness));
+      }
+      
+      // Handle recoil damage
+      const recoilDamage = calculateRecoilDamage(secondAttacker, secondMove, result.damage);
+      if (recoilDamage > 0) {
+        secondAttacker.stats.currentHp = Math.max(0, secondAttacker.stats.currentHp - recoilDamage);
+        logMessage(`${capitalize(secondAttacker.name)} was hurt by recoil! It took ${recoilDamage} damage!`);
       }
       
       if (secondDefender.stats.currentHp === 0) {
         logMessage(`${capitalize(secondDefender.name)} fainted!`);
+        updateUI();
+        return checkBattleEnd();
+      }
+      
+      if (secondAttacker.stats.currentHp === 0) {
+        logMessage(`${capitalize(secondAttacker.name)} fainted from recoil!`);
         updateUI();
         return checkBattleEnd();
       }
@@ -611,7 +884,7 @@ function updateMoveButtons() {
 
 function updateTopBar() {
   document.getElementById('battle-number').textContent = gameState.battleNumber;
-  document.getElementById('total-battles').textContent = gameState.totalBattles;
+  // No longer showing total battles since it's infinite
   document.getElementById('catch-cooldown').textContent = gameState.catchCooldown;
 }
 
@@ -731,21 +1004,30 @@ async function nextBattle() {
     gameState.catchCooldown--;
   }
   
-  if (gameState.battleNumber > gameState.totalBattles) {
-    showEndScreen('Victory!', `Congratulations! You completed all ${gameState.totalBattles} battles!`);
-    return;
-  }
+  // Remove battle limit - allow infinite battles
+  // if (gameState.battleNumber > gameState.totalBattles) {
+  //   showEndScreen('Victory!', `Congratulations! You completed all ${gameState.totalBattles} battles!`);
+  //   return;
+  // }
   
   // Reset UI
   document.getElementById('post-battle').classList.add('hidden');
   document.getElementById('move-buttons').style.display = 'grid';
   clearLog();
+  
+  // Reset charging move states
+  battleState.playerChargingMove = null;
+  battleState.foeChargingMove = null;
 
   // Heal the entire team between battles
   gameState.playerTeam.forEach(p => {
     p.stats.currentHp = p.stats.maxHp;
+    // Restore all PP to maximum
+    p.moves.forEach(move => {
+      move.currentPp = move.maxPp;
+    });
   });
-  logMessage('Your team was fully healed!');
+  logMessage('Your team was fully healed and all PP was restored!');
   
   // Generate new opponent
   logMessage('A wild Pokémon appeared!');
@@ -779,6 +1061,10 @@ function restartGame() {
     messageLog: []
   });
   
+  // Reset charging move states
+  battleState.playerChargingMove = null;
+  battleState.foeChargingMove = null;
+  
   // Show start screen
   document.getElementById('end-screen').classList.add('hidden');
   document.getElementById('game-screen').classList.add('hidden');
@@ -797,9 +1083,9 @@ async function startGame() {
   document.getElementById('start-screen').classList.add('hidden');
   document.getElementById('game-screen').classList.remove('hidden');
   
-  // Initialize player team with a weak Pokémon of chosen type
+  // Initialize player team with a stronger starter Pokémon of chosen type
   logMessage('Loading your first Pokémon...');
-  const starterData = await getWeakPokemonOfType(gameState.playerType);
+  const starterData = await getStarterPokemonOfType(gameState.playerType);
   const starterPokemon = await createPokemonBattleInstance(starterData, DEFAULT_LEVEL);
   starterPokemon.isPlayer = true;
   
