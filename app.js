@@ -9,11 +9,12 @@ const gameState = {
   currentPlayerPokemon: null,
   currentFoePokemon: null,
   nextFoePokemon: null, // preloaded opponent for next battle
+  replacementCandidate: null, // holds caught Pokemon awaiting replacement selection
   battleNumber: 1,
   totalBattles: 8,
   catchCooldown: 0,
   isInBattle: false,
-  battlePhase: 'select-move', // 'select-move', 'battle-end', 'catch-prompt'
+  battlePhase: 'select-move', // 'select-move', 'battle-end', 'catch-prompt', 'pokemon-selection', 'replacement-selection'
   messageLog: []
 };
 
@@ -83,7 +84,8 @@ const SPECIAL_MOVES = {
 // Battle state for 2-turn moves
 const battleState = {
   playerChargingMove: null,
-  foeChargingMove: null
+  foeChargingMove: null,
+  futureSightQueue: [] // { target: 'player'|'foe', turnsRemaining: number, power: number, attacker: { level, specialattack } }
 };
 
 // Level and stat assumptions
@@ -216,6 +218,30 @@ async function executeSpecialMove(attacker, defender, move, isPlayer) {
     }
   }
   
+  // Handle unique status moves
+  if (move.damage_class && move.damage_class.name === 'status') {
+    const name = move.name;
+    if (name === 'rest') {
+      attacker.stats.currentHp = attacker.stats.maxHp;
+      if (!attacker.status) attacker.status = { sleepTurns: 0 };
+      attacker.status.sleepTurns = 2; // sleep for two turns
+      logMessage(`${capitalize(attacker.name)} used Rest! It fell asleep and restored its health!`);
+      return { damage: 0, statusOnly: true };
+    }
+    if (name === 'future-sight') {
+      // Queue a delayed attack that lands after 2 turns
+      const targetKey = isPlayer ? 'foe' : 'player';
+      const attackerSnapshot = { level: attacker.level, specialattack: attacker.stats.specialattack };
+      const power = move.power || 120;
+      battleState.futureSightQueue.push({ target: targetKey, turnsRemaining: 2, power, attacker: attackerSnapshot });
+      logMessage(`${capitalize(attacker.name)} foresaw an attack!`);
+      return { damage: 0, statusOnly: true };
+    }
+    // Generic status moves not yet implemented fully
+    logMessage(`${capitalize(attacker.name)} used ${capitalize(move.name)}!`);
+    return { damage: 0, statusOnly: true };
+  }
+
   // Handle multi-hit moves
   if (isMultiHitMove(move.name)) {
     const hitCount = getMultiHitCount(move.name);
@@ -422,15 +448,17 @@ async function fetchRandomOpponentByBST(minBST, maxBST) {
 }
 
 async function getRandomOpponentPokemon(battleNumber) {
-  // Calculate minimum BST based on battle number for scaling difficulty.
-  // No maximum cap so late-game can surface legendaries and other high-BST Pokémon.
-  const baseMinBST = 250; // Very weak Pokemon floor
-  const bstIncreasePerBattle = 15; // Gradual BST increase
-  
+  // Calculate minimum and maximum BST based on battle number for scaling difficulty.
+  const baseMinBST = 175; // Very weak Pokemon floor
+  const bstIncreasePerBattle = 8; // Slower increase per battle
+
+  const baseMaxBST = 300; // Add a base maximum BST
+  const maxBSTIncreasePerBattle = 12; // How much max increases per battle
+
   const minBST = baseMinBST + (battleNumber - 1) * bstIncreasePerBattle;
-  
-  // Pass only the minimum; fetchRandomOpponentByBST will not restrict the maximum.
-  return await fetchRandomOpponentByBST(minBST);
+  const maxBST = baseMaxBST + (battleNumber - 1) * maxBSTIncreasePerBattle;
+
+  return await fetchRandomOpponentByBST(minBST, maxBST);
 }
 
 // ==========================================
@@ -479,31 +507,60 @@ function shuffle(arr) {
 async function buildRandomMoves(pokemonData) {
   const candidates = Array.isArray(pokemonData.candidateMoves) ? [...pokemonData.candidateMoves] : [];
   shuffle(candidates);
-  const picked = [];
-  for (let i = 0; i < candidates.length && picked.length < 4; i++) {
+
+  const stabDamaging = [];
+  const damaging = [];
+  const status = [];
+
+  for (let i = 0; i < candidates.length; i++) {
     const moveDetail = await fetchMoveDetail(candidates[i]);
-    if (!moveDetail) continue;
-    const isDamaging = moveDetail.power && moveDetail.damage_class && moveDetail.damage_class.name !== 'status';
-    if (!isDamaging) continue;
-    picked.push({
+    if (!moveDetail || !moveDetail.type || !moveDetail.damage_class) continue;
+
+    const move = {
       name: moveDetail.name,
-      power: moveDetail.power,
+      power: moveDetail.power || 0,
       accuracy: moveDetail.accuracy,
       pp: moveDetail.pp || 20,
       type: { name: moveDetail.type.name },
       damage_class: { name: moveDetail.damage_class.name },
       currentPp: moveDetail.pp || 20,
       maxPp: moveDetail.pp || 20
-    });
+    };
+
+    const isDamaging = moveDetail.damage_class.name !== 'status' && (moveDetail.power || 0) > 0;
+    const hasSTAB = pokemonData.types && pokemonData.types.some(t => t.type.name === moveDetail.type.name);
+    
+    if (isDamaging && hasSTAB) stabDamaging.push(move);
+    else if (isDamaging) damaging.push(move);
+    else status.push(move);
+
+    // Safety cap to avoid too many fetches if we already have enough variety
+    if (stabDamaging.length + damaging.length + status.length >= 24) break;
   }
-  
+
+  const picked = [];
+  // Ensure at least one STAB damaging move if available
+  if (stabDamaging.length > 0) {
+    shuffle(stabDamaging);
+    picked.push(stabDamaging[0]);
+  }
+
+  // Fill remaining slots with a mix of damaging and status moves
+  const pool = shuffle([...damaging, ...status, ...stabDamaging.slice(1)]);
+  for (let i = 0; i < pool.length && picked.length < 4; i++) {
+    // Avoid duplicates by name
+    if (!picked.some(m => m.name === pool[i].name)) {
+      picked.push(pool[i]);
+    }
+  }
+
   if (picked.length === 0) {
-    // Fallback basic moveset
+    // Fallback basic moveset if nothing found
     picked.push({
       name: 'tackle', power: 40, accuracy: 100, pp: 35, type: { name: 'normal' }, damage_class: { name: 'physical' }, currentPp: 35, maxPp: 35
     });
   }
-  
+
   // Ensure exactly 4 moves (duplicate some if necessary)
   while (picked.length < 4) {
     picked.push({ ...picked[0], currentPp: picked[0].maxPp });
@@ -519,6 +576,7 @@ async function createPokemonBattleInstance(pokemonData, level = DEFAULT_LEVEL) {
     level,
     stats,
     moves,
+    status: { sleepTurns: 0 },
     isPlayer: false
   };
 }
@@ -572,10 +630,23 @@ function getAIMoveChoice(pokemon) {
     // Use Struggle (not implemented, just use first move)
     return pokemon.moves[0];
   }
-  
-  // Simple AI: prefer higher power moves
-  availableMoves.sort((a, b) => (b.power || 0) - (a.power || 0));
-  return availableMoves[0];
+
+  // Heuristic: prefer higher power damaging moves; avoid Rest unless HP <= 50%
+  const hpRatio = pokemon.stats.currentHp / pokemon.stats.maxHp;
+  const scored = availableMoves.map(m => {
+    let score = 0;
+    const isDamaging = m.damage_class && m.damage_class.name !== 'status' && (m.power || 0) > 0;
+    if (m.name === 'rest') {
+      score = hpRatio <= 0.5 ? 80 : 5;
+    } else if (isDamaging) {
+      score = (m.power || 0) * ((m.accuracy || 100) / 100);
+    } else {
+      score = 20; // generic utility for status moves
+    }
+    return { move: m, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].move;
 }
 
 // ==========================================
@@ -607,7 +678,8 @@ async function executeTurn(playerMove, foeMove) {
   const secondIsPlayer = !playerFirst;
   
   // First attack
-  if (firstMove && (firstMove.currentPp > 0 || battleState[firstIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
+  const firstAsleep = handleSleepBeforeAction(firstAttacker);
+  if (!firstAsleep && firstMove && (firstMove.currentPp > 0 || battleState[firstIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
     // Don't consume PP if continuing a charging move
     if (!battleState[firstIsPlayer ? 'playerChargingMove' : 'foeChargingMove']) {
       firstMove.currentPp--;
@@ -671,7 +743,8 @@ async function executeTurn(playerMove, foeMove) {
   }
   
   // Second attack (if first defender didn't faint)
-  if (secondDefender.stats.currentHp > 0 && secondMove && (secondMove.currentPp > 0 || battleState[secondIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
+  const secondAsleep = handleSleepBeforeAction(secondAttacker);
+  if (!secondAsleep && secondDefender.stats.currentHp > 0 && secondMove && (secondMove.currentPp > 0 || battleState[secondIsPlayer ? 'playerChargingMove' : 'foeChargingMove'])) {
     // Don't consume PP if continuing a charging move
     if (!battleState[secondIsPlayer ? 'playerChargingMove' : 'foeChargingMove']) {
       secondMove.currentPp--;
@@ -734,6 +807,10 @@ async function executeTurn(playerMove, foeMove) {
     }
   }
   
+  // End of turn effects (e.g., Future Sight)
+  const endResult = processEndOfTurnEffects();
+  if (endResult) return endResult;
+
   updateUI();
   return null; // Continue battle
 }
@@ -877,20 +954,23 @@ function updateTeamDisplay() {
     memberEl.appendChild(spriteEl);
     memberEl.appendChild(infoEl);
     
-    // Add click handler for switching
-    // During pokemon-selection phase (after faint), allow clicking any alive pokemon
-    // During normal play, allow switching to non-current alive pokemon
+    // Add click handler for switching or replacement
     if (pokemon.stats.currentHp > 0) {
-      const canSelect = gameState.battlePhase === 'pokemon-selection' || 
+      const canSelectSwitch = gameState.battlePhase === 'pokemon-selection' || 
                        (pokemon !== gameState.currentPlayerPokemon && gameState.battlePhase === 'select-move');
+      const canSelectReplacement = gameState.battlePhase === 'replacement-selection';
       
-      if (canSelect) {
+      if (canSelectSwitch || canSelectReplacement) {
         memberEl.classList.add('clickable');
-        if (gameState.battlePhase === 'pokemon-selection') {
+        if (gameState.battlePhase === 'pokemon-selection' || gameState.battlePhase === 'replacement-selection') {
           memberEl.classList.add('selection-available');
         }
         memberEl.addEventListener('click', () => {
-          handleSwitchDuringTurn(pokemon);
+          if (gameState.battlePhase === 'replacement-selection') {
+            handleReplacementViaPanel(index);
+          } else {
+            handleSwitchDuringTurn(pokemon);
+          }
         });
       }
     }
@@ -940,91 +1020,87 @@ function updateTopBar() {
 }
 
 // ==========================================
+// STATUS & END-OF-TURN HELPERS
+// ==========================================
+
+function handleSleepBeforeAction(pokemon) {
+  if (pokemon.status && pokemon.status.sleepTurns && pokemon.status.sleepTurns > 0) {
+    logMessage(`${capitalize(pokemon.name)} is fast asleep!`);
+    pokemon.status.sleepTurns--;
+    if (pokemon.status.sleepTurns === 0) {
+      logMessage(`${capitalize(pokemon.name)} woke up!`);
+    }
+    return true; // cannot act this turn
+  }
+  return false;
+}
+
+function processEndOfTurnEffects() {
+  // Process Future Sight queue
+  if (battleState.futureSightQueue.length > 0) {
+    battleState.futureSightQueue.forEach(fs => fs.turnsRemaining--);
+    const toApply = battleState.futureSightQueue.filter(fs => fs.turnsRemaining <= 0);
+    battleState.futureSightQueue = battleState.futureSightQueue.filter(fs => fs.turnsRemaining > 0);
+
+    for (const fs of toApply) {
+      const target = fs.target === 'player' ? gameState.currentPlayerPokemon : gameState.currentFoePokemon;
+      if (!target || target.stats.currentHp === 0) continue;
+      // Calculate damage similar to normal but without STAB and without type effectiveness
+      const level = fs.attacker.level;
+      const power = fs.power;
+      const attackStat = fs.attacker.specialattack;
+      const defenseStat = target.stats.specialdefense;
+      const base = Math.floor(Math.floor(Math.floor((2 * level) / 5 + 2) * power * attackStat / Math.max(1, defenseStat)) / 50) + 2;
+      const rand = 0.85 + Math.random() * 0.15;
+      const damage = Math.max(1, Math.floor(base * rand));
+
+      target.stats.currentHp = Math.max(0, target.stats.currentHp - damage);
+      logMessage(`Future Sight struck ${capitalize(target.name)} for ${damage} damage!`);
+      if (target.stats.currentHp === 0) {
+        logMessage(`${capitalize(target.name)} fainted!`);
+        updateUI();
+        return checkBattleEnd();
+      }
+    }
+  }
+  return null;
+}
+
+// ==========================================
 // POKEMON SELECTION SYSTEM
 // ==========================================
 
 // Pokemon selection now handled directly through the team side panel
 // No separate overlay needed
 
-function showReplacementSelection(caughtPokemon) {
-  document.getElementById('replacement-selection').classList.remove('hidden');
-  
-  const replacementList = document.getElementById('replacement-list');
-  replacementList.innerHTML = '';
-  
-  gameState.playerTeam.forEach((pokemon, index) => {
-    const memberEl = document.createElement('div');
-    memberEl.className = 'replacement-member';
-    
-    const spriteEl = document.createElement('div');
-    spriteEl.className = 'sprite';
-    if (pokemon.sprites.front_default) {
-      spriteEl.style.backgroundImage = `url(${pokemon.sprites.front_default})`;
-    }
-    
-    const infoEl = document.createElement('div');
-    infoEl.className = 'info';
-    
-    const nameEl = document.createElement('div');
-    nameEl.className = 'name';
-    nameEl.textContent = capitalize(pokemon.name);
-    
-    const typesEl = document.createElement('div');
-    typesEl.className = 'types';
-    typesEl.textContent = pokemon.types.map(t => capitalize(t.type.name)).join(', ');
-    
-    const hpBarEl = document.createElement('div');
-    hpBarEl.className = 'hpbar';
-    const hpFillEl = document.createElement('div');
-    const hpPercent = (pokemon.stats.currentHp / pokemon.stats.maxHp) * 100;
-    hpFillEl.className = 'fill';
-    hpFillEl.style.width = `${hpPercent}%`;
-    if (hpPercent < 25) hpFillEl.className += ' critical';
-    else if (hpPercent < 50) hpFillEl.className += ' low';
-    hpBarEl.appendChild(hpFillEl);
-    
-    const hpTextEl = document.createElement('div');
-    hpTextEl.className = 'hp-text';
-    hpTextEl.textContent = `${pokemon.stats.currentHp}/${pokemon.stats.maxHp}`;
-    
-    infoEl.appendChild(nameEl);
-    infoEl.appendChild(typesEl);
-    infoEl.appendChild(hpBarEl);
-    infoEl.appendChild(hpTextEl);
-    
-    memberEl.appendChild(spriteEl);
-    memberEl.appendChild(infoEl);
-    
-    memberEl.addEventListener('click', () => {
-      handleReplacement(index, caughtPokemon);
-    });
-    
-    replacementList.appendChild(memberEl);
-  });
-}
+// ==========================================
+// REPLACEMENT VIA TEAM PANEL
+// ==========================================
 
-function handleReplacement(replaceIndex, caughtPokemon) {
+function handleReplacementViaPanel(replaceIndex) {
+  if (gameState.battlePhase !== 'replacement-selection' || !gameState.replacementCandidate) return;
+  const caughtPokemon = gameState.replacementCandidate;
   const replacedPokemon = gameState.playerTeam[replaceIndex];
   logMessage(`You released ${capitalize(replacedPokemon.name)} to make room for ${capitalize(caughtPokemon.name)}!`);
   
   // Replace the Pokemon in the team
   gameState.playerTeam[replaceIndex] = caughtPokemon;
-  
-  // If the replaced Pokemon was the current one, switch to the new one
+
+  // If the replaced Pokemon was the current one (edge case between battles), set a safe current
   if (gameState.currentPlayerPokemon === replacedPokemon) {
     gameState.currentPlayerPokemon = caughtPokemon;
   }
-  
-  gameState.catchCooldown = 3;
-  document.getElementById('replacement-selection').classList.add('hidden');
-  
+
+  // Clear state and proceed
+  gameState.replacementCandidate = null;
+  gameState.battlePhase = 'select-move';
+  try {
+    const movesEl = document.getElementById('move-buttons');
+    if (movesEl) movesEl.style.display = 'grid';
+  } catch (e) {}
+
   // Immediately proceed to the next battle after replacement
   nextBattle();
-}
-
-function cancelCatch() {
-  document.getElementById('replacement-selection').classList.add('hidden');
-  document.getElementById('next-battle').classList.remove('hidden');
 }
 
 // ==========================================
@@ -1145,9 +1221,15 @@ function handleCatch(shouldCatch) {
       nextBattle();
       return;
     } else {
-      // Team is full, show replacement selection
-      logMessage(`You caught ${capitalize(caughtPokemon.name)}, but your team is full!`);
-      showReplacementSelection(caughtPokemon);
+      // Team is full, choose replacement via side panel
+      logMessage(`You caught ${capitalize(caughtPokemon.name)}, but your team is full! Choose a Pokémon to replace from the Your Team panel.`);
+      gameState.replacementCandidate = caughtPokemon;
+      gameState.battlePhase = 'replacement-selection';
+      try {
+        const movesEl = document.getElementById('move-buttons');
+        if (movesEl) movesEl.style.display = 'none';
+      } catch (e) {}
+      updateUI();
       return;
     }
   }
@@ -1176,9 +1258,10 @@ async function nextBattle() {
   document.getElementById('move-buttons').style.display = 'grid';
   clearLog();
   
-  // Reset charging move states
+  // Reset charging move states and Future Sight queue
   battleState.playerChargingMove = null;
   battleState.foeChargingMove = null;
+  battleState.futureSightQueue = [];
 
   // Heal the entire team between battles
   gameState.playerTeam.forEach(p => {
@@ -1223,6 +1306,7 @@ function restartGame() {
     currentPlayerPokemon: null,
     currentFoePokemon: null,
     nextFoePokemon: null,
+    replacementCandidate: null,
     battleNumber: 1,
     totalBattles: 8,
     catchCooldown: 0,
@@ -1231,9 +1315,10 @@ function restartGame() {
     messageLog: []
   });
   
-  // Reset charging move states
+  // Reset charging move states and Future Sight queue
   battleState.playerChargingMove = null;
   battleState.foeChargingMove = null;
+  battleState.futureSightQueue = [];
   
   // Show start screen
   document.getElementById('end-screen').classList.add('hidden');
@@ -1321,9 +1406,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // Catch buttons
   document.getElementById('catch-yes').addEventListener('click', () => handleCatch(true));
   document.getElementById('catch-no').addEventListener('click', () => handleCatch(false));
-  
-  // Cancel catch button
-  document.getElementById('cancel-catch').addEventListener('click', cancelCatch);
   
   // Next battle button
   document.getElementById('next-battle').addEventListener('click', nextBattle);
