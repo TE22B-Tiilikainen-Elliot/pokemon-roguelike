@@ -756,9 +756,15 @@ function checkBattleEnd() {
       updateUI();
       return null; // Continue battle
     } else {
-      // Multiple Pokemon available, let player choose
-      showPokemonSelection(alivePokemon);
-      return 'pokemon-selection'; // Special state for Pokemon selection
+      // Multiple Pokemon available, let player choose via the Team side panel
+      gameState.battlePhase = 'pokemon-selection';
+      try {
+        const movesEl = document.getElementById('move-buttons');
+        if (movesEl) movesEl.style.display = 'none';
+      } catch (e) {}
+      logMessage('Choose your next Pokémon from the Your Team panel.');
+      updateUI();
+      return 'pokemon-selection'; // Await user to click a team member
     }
   } else if (foe.stats.currentHp === 0) {
     // Player won the battle
@@ -871,11 +877,22 @@ function updateTeamDisplay() {
     memberEl.appendChild(spriteEl);
     memberEl.appendChild(infoEl);
     
-    // Add click handler for switching (if not current and not fainted)
-    if (pokemon !== gameState.currentPlayerPokemon && pokemon.stats.currentHp > 0) {
-      memberEl.addEventListener('click', () => {
-        handleSwitchDuringTurn(pokemon);
-      });
+    // Add click handler for switching
+    // During pokemon-selection phase (after faint), allow clicking any alive pokemon
+    // During normal play, allow switching to non-current alive pokemon
+    if (pokemon.stats.currentHp > 0) {
+      const canSelect = gameState.battlePhase === 'pokemon-selection' || 
+                       (pokemon !== gameState.currentPlayerPokemon && gameState.battlePhase === 'select-move');
+      
+      if (canSelect) {
+        memberEl.classList.add('clickable');
+        if (gameState.battlePhase === 'pokemon-selection') {
+          memberEl.classList.add('selection-available');
+        }
+        memberEl.addEventListener('click', () => {
+          handleSwitchDuringTurn(pokemon);
+        });
+      }
     }
     
     teamList.appendChild(memberEl);
@@ -926,74 +943,8 @@ function updateTopBar() {
 // POKEMON SELECTION SYSTEM
 // ==========================================
 
-function showPokemonSelection(availablePokemon) {
-  gameState.battlePhase = 'pokemon-selection';
-  document.getElementById('move-buttons').style.display = 'none';
-  document.getElementById('pokemon-selection').classList.remove('hidden');
-  
-  const selectionList = document.getElementById('selection-list');
-  selectionList.innerHTML = '';
-  
-  availablePokemon.forEach(pokemon => {
-    const memberEl = document.createElement('div');
-    memberEl.className = 'selection-member';
-    
-    const spriteEl = document.createElement('div');
-    spriteEl.className = 'sprite';
-    if (pokemon.sprites.front_default) {
-      spriteEl.style.backgroundImage = `url(${pokemon.sprites.front_default})`;
-    }
-    
-    const infoEl = document.createElement('div');
-    infoEl.className = 'info';
-    
-    const nameEl = document.createElement('div');
-    nameEl.className = 'name';
-    nameEl.textContent = capitalize(pokemon.name);
-    
-    const typesEl = document.createElement('div');
-    typesEl.className = 'types';
-    typesEl.textContent = pokemon.types.map(t => capitalize(t.type.name)).join(', ');
-    
-    const hpBarEl = document.createElement('div');
-    hpBarEl.className = 'hpbar';
-    const hpFillEl = document.createElement('div');
-    const hpPercent = (pokemon.stats.currentHp / pokemon.stats.maxHp) * 100;
-    hpFillEl.className = 'fill';
-    hpFillEl.style.width = `${hpPercent}%`;
-    if (hpPercent < 25) hpFillEl.className += ' critical';
-    else if (hpPercent < 50) hpFillEl.className += ' low';
-    hpBarEl.appendChild(hpFillEl);
-    
-    const hpTextEl = document.createElement('div');
-    hpTextEl.className = 'hp-text';
-    hpTextEl.textContent = `${pokemon.stats.currentHp}/${pokemon.stats.maxHp}`;
-    
-    infoEl.appendChild(nameEl);
-    infoEl.appendChild(typesEl);
-    infoEl.appendChild(hpBarEl);
-    infoEl.appendChild(hpTextEl);
-    
-    memberEl.appendChild(spriteEl);
-    memberEl.appendChild(infoEl);
-    
-    memberEl.addEventListener('click', () => {
-      handlePokemonSelection(pokemon);
-    });
-    
-    selectionList.appendChild(memberEl);
-  });
-}
-
-function handlePokemonSelection(selectedPokemon) {
-  gameState.currentPlayerPokemon = selectedPokemon;
-  document.getElementById('pokemon-selection').classList.add('hidden');
-  document.getElementById('move-buttons').style.display = 'grid';
-  gameState.battlePhase = 'select-move';
-  
-  logMessage(`Go, ${capitalize(selectedPokemon.name)}!`);
-  updateUI();
-}
+// Pokemon selection now handled directly through the team side panel
+// No separate overlay needed
 
 function showReplacementSelection(caughtPokemon) {
   document.getElementById('replacement-selection').classList.remove('hidden');
@@ -1090,6 +1041,19 @@ async function handleSwitchDuringTurn(targetPokemon) {
   gameState.currentPlayerPokemon = targetPokemon;
   logMessage(`You switched to ${capitalize(targetPokemon.name)}!`);
   updateUI();
+
+  // If this switch is in response to a faint, do NOT consume a turn; restore move selection
+  if (wasFainted || gameState.battlePhase === 'pokemon-selection') {
+    try {
+      const sel = document.getElementById('pokemon-selection');
+      if (sel) sel.classList.add('hidden');
+      const movesEl = document.getElementById('move-buttons');
+      if (movesEl) movesEl.style.display = 'grid';
+    } catch (e) {}
+    gameState.battlePhase = 'select-move';
+    updateMoveButtons();
+    return;
+  }
 
   // If the switch was voluntary (not after a faint), it consumes your turn
   if (!wasFainted && gameState.battlePhase === 'select-move') {
